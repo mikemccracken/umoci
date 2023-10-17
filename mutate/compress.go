@@ -25,6 +25,10 @@ type Compressor interface {
 
 	// WithOpt applies an option and can be chained.
 	WithOpt(CompressorOpt) Compressor
+
+	// BytesRead returns the number of bytes read from the uncompressed input
+	// stream at the current time, no guarantee of completion.
+	BytesRead() int64
 }
 
 // CompressorOpt is a compressor option which can be used to configure a
@@ -41,23 +45,28 @@ func (nc noopCompressor) MediaTypeSuffix() string {
 	return ""
 }
 
+func (nc noopCompressor) BytesRead() int64 {
+	return -1
+}
+
 // NoopCompressor provides no compression.
-var NoopCompressor Compressor = noopCompressor{}
+var NoopCompressor Compressor = &noopCompressor{}
 
 func (nc noopCompressor) WithOpt(CompressorOpt) Compressor {
 	return nc
 }
 
 // GzipCompressor provides gzip compression.
-var GzipCompressor Compressor = gzipCompressor{blockSize: 256 << 10}
+var GzipCompressor Compressor = &gzipCompressor{blockSize: 256 << 10}
 
 type GzipBlockSize int
 
 type gzipCompressor struct {
 	blockSize int
+	bytesRead int64
 }
 
-func (gz gzipCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
+func (gz *gzipCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
 	pipeReader, pipeWriter := io.Pipe()
 
 	gzw := gzip.NewWriter(pipeWriter)
@@ -65,12 +74,14 @@ func (gz gzipCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
 		return nil, errors.Wrapf(err, "set concurrency level to %v blocks", 2*runtime.NumCPU())
 	}
 	go func() {
-		if _, err := system.Copy(gzw, reader); err != nil {
+		bytesRead, err := system.Copy(gzw, reader)
+		if err != nil {
 			log.Warnf("gzip compress: could not compress layer: %v", err)
 			// #nosec G104
 			_ = pipeWriter.CloseWithError(errors.Wrap(err, "compressing layer"))
 			return
 		}
+		gz.bytesRead = bytesRead
 		if err := gzw.Close(); err != nil {
 			log.Warnf("gzip compress: could not close gzip writer: %v", err)
 			// #nosec G104
@@ -97,15 +108,21 @@ func (gz gzipCompressor) WithOpt(opt CompressorOpt) Compressor {
 		gz.blockSize = int(val)
 	}
 
-	return gz
+	return &gz
+}
+
+func (gz gzipCompressor) BytesRead() int64 {
+	return gz.bytesRead
 }
 
 // ZstdCompressor provides zstd compression.
-var ZstdCompressor Compressor = zstdCompressor{}
+var ZstdCompressor Compressor = &zstdCompressor{}
 
-type zstdCompressor struct{}
+type zstdCompressor struct {
+	bytesRead int64
+}
 
-func (zs zstdCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
+func (zs *zstdCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
 
 	pipeReader, pipeWriter := io.Pipe()
 	zw, err := zstd.NewWriter(pipeWriter)
@@ -113,12 +130,14 @@ func (zs zstdCompressor) Compress(reader io.Reader) (io.ReadCloser, error) {
 		return nil, err
 	}
 	go func() {
-		if _, err := system.Copy(zw, reader); err != nil {
+		bytesRead, err := system.Copy(zw, reader)
+		if err != nil {
 			log.Warnf("zstd compress: could not compress layer: %v", err)
 			// #nosec G104
 			_ = pipeWriter.CloseWithError(errors.Wrap(err, "compressing layer"))
 			return
 		}
+		zs.bytesRead = bytesRead
 		if err := zw.Close(); err != nil {
 			log.Warnf("zstd compress: could not close gzip writer: %v", err)
 			// #nosec G104
@@ -140,5 +159,9 @@ func (zs zstdCompressor) MediaTypeSuffix() string {
 }
 
 func (zs zstdCompressor) WithOpt(CompressorOpt) Compressor {
-	return zs
+	return &zs
+}
+
+func (zs zstdCompressor) BytesRead() int64 {
+	return zs.bytesRead
 }
